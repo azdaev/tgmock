@@ -7,7 +7,7 @@ Works with any bot framework (aiogram, python-telegram-bot, Telegraf, go-telegra
 **TL;DR** — add the marketplace, install the plugin, add 4 lines to your bot, and ask Claude to test it:
 
 ```bash
-/plugin marketplace add github:azdaev/tgmock
+/plugin marketplace add azdaev/tgmock
 /plugin install tgmock@tgmock
 ```
 
@@ -22,7 +22,7 @@ Claude will guide you through the rest with `/tgmock:setup` and `/tgmock:test`.
 Installs the MCP server + skills automatically:
 
 ```bash
-/plugin marketplace add github:azdaev/tgmock
+/plugin marketplace add azdaev/tgmock
 /plugin install tgmock@tgmock
 ```
 
