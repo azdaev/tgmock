@@ -1,0 +1,22 @@
+{
+  "name": "tgmock",
+  "owner": {
+    "name": "tgmock contributors"
+  },
+  "metadata": {
+    "description": "Fake Telegram API server for testing bots"
+  },
+  "plugins": [
+    {
+      "name": "tgmock",
+      "source": "./",
+      "description": "Fake Telegram API server — pytest plugin + MCP tools (tg_start, tg_send, tg_tap, tg_logs, tg_restart…)",
+      "version": "0.1.0",
+      "author": {
+        "name": "tgmock contributors"
+      },
+      "category": "testing",
+      "tags": ["telegram", "bot", "testing", "mock", "pytest", "mcp"]
+    }
+  ]
+}
