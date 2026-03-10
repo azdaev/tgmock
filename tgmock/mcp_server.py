@@ -27,6 +27,7 @@ except ImportError:
     _MCP_AVAILABLE = False
 
 import asyncio
+import collections
 import json
 import os
 import subprocess
@@ -42,6 +43,8 @@ _client_session = None     # aiohttp.ClientSession
 _base_url: str = "http://localhost:8999"
 _default_user_id: int = 111
 _default_timeout: float = 25.0
+_bot_logs: collections.deque = collections.deque(maxlen=100)  # rolling log buffer
+_log_reader_task: asyncio.Task | None = None
 
 
 def _snapshot_text(messages: list[dict]) -> str:
@@ -72,6 +75,27 @@ async def _get_session():
     return _client_session
 
 
+def _store_log(line: str) -> None:
+    """Store a log line in the rolling buffer."""
+    _bot_logs.append(line.rstrip())
+
+
+async def _start_log_reader(proc: subprocess.Popen) -> None:
+    """Background task: drain bot stdout into the log buffer."""
+    global _log_reader_task
+    loop = asyncio.get_event_loop()
+
+    async def _drain():
+        while proc.poll() is None:
+            line = await loop.run_in_executor(None, proc.stdout.readline)
+            if not line:
+                break
+            _store_log(line)
+            sys.stderr.write(f"[BOT] {line}")
+
+    _log_reader_task = asyncio.ensure_future(_drain())
+
+
 async def _wait_ready(proc: subprocess.Popen, ready_log: str, timeout: float) -> None:
     loop = asyncio.get_event_loop()
     async def _read():
@@ -79,6 +103,7 @@ async def _wait_ready(proc: subprocess.Popen, ready_log: str, timeout: float) ->
             line = await loop.run_in_executor(None, proc.stdout.readline)
             if not line:
                 raise RuntimeError("Bot exited before ready")
+            _store_log(line)
             sys.stderr.write(f"[BOT] {line}")
             if ready_log.lower() in line.lower():
                 return
@@ -87,21 +112,52 @@ async def _wait_ready(proc: subprocess.Popen, ready_log: str, timeout: float) ->
 
 # ── MCP tool implementations ──────────────────────────────────────────────────
 
-async def _tg_start(bot_command: str, port: int = 8999, ready_log: str = "bot starting",
-                    env: dict | None = None, startup_timeout: float = 15.0) -> dict:
+async def _tg_start(bot_command: str | None = None, port: int | None = None,
+                    ready_log: str | None = None, env: dict | None = None,
+                    startup_timeout: float | None = None,
+                    build_command: str | None = None) -> dict:
     global _mock, _bot_proc, _server_runner, _base_url
+    _bot_logs.clear()
 
+    from pathlib import Path
+    from tgmock._config import load_config
     from tgmock.server import TelegramMockServer
+
+    # Load project config from cwd (Claude Code sets MCP server cwd = project root)
+    cfg = load_config(Path.cwd())
+    bot_command = bot_command or cfg.bot_command
+    port = port if port is not None else cfg.port
+    ready_log = ready_log or cfg.ready_log
+    startup_timeout = startup_timeout if startup_timeout is not None else cfg.startup_timeout
+    build_command = build_command or cfg.build_command
+
     _base_url = f"http://localhost:{port}"
+
+    # Build env: os.environ base + .env file + BOT_API_BASE + caller overrides
+    bot_env = {**os.environ}
+    env_file = Path.cwd() / cfg.env_file
+    if env_file.exists():
+        import dotenv
+        bot_env.update(dotenv.dotenv_values(env_file))
+    bot_env["BOT_API_BASE"] = _base_url  # always redirect to mock
+    bot_env.update(cfg.env)
+    if env:
+        bot_env.update(env)   # caller overrides win
+
+    # Run build command if configured (e.g. compile Go binary before starting)
+    if build_command:
+        sys.stderr.write(f"[tgmock] building: {build_command}\n")
+        loop = asyncio.get_event_loop()
+        ret = await loop.run_in_executor(
+            None, lambda: subprocess.run(build_command, shell=True, env=bot_env, cwd=str(Path.cwd()))
+        )
+        if ret.returncode != 0:
+            raise RuntimeError(f"Build command failed (exit {ret.returncode}): {build_command}")
 
     # Start mock server
     _mock = TelegramMockServer(token="test:token", port=port)
     _server_runner = await _mock.start()
 
-    # Start bot subprocess
-    bot_env = {**os.environ, "BOT_API_BASE": _base_url, "BOT_TOKEN": "test:token"}
-    if env:
-        bot_env.update(env)
     cmd = bot_command.split()
     _bot_proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -109,8 +165,22 @@ async def _tg_start(bot_command: str, port: int = 8999, ready_log: str = "bot st
     )
 
     t0 = asyncio.get_event_loop().time()
-    await _wait_ready(_bot_proc, ready_log, startup_timeout)
+    try:
+        await _wait_ready(_bot_proc, ready_log, startup_timeout)
+    except Exception as e:
+        # Capture last logs before cleanup
+        last_logs = list(_bot_logs)[-30:]
+        _bot_proc.terminate()
+        _bot_proc = None
+        await _server_runner.cleanup()
+        _server_runner = None
+        _mock = None
+        log_text = "\n".join(last_logs) if last_logs else "(no output captured)"
+        raise RuntimeError(f"Bot failed to start: {e}\n\nLast bot output:\n{log_text}") from e
     elapsed = asyncio.get_event_loop().time() - t0
+
+    # Start background log reader to keep draining stdout
+    await _start_log_reader(_bot_proc)
 
     return {"ok": True, "port": port, "pid": _bot_proc.pid, "message": f"Bot ready after {elapsed:.1f}s"}
 
@@ -208,6 +278,72 @@ async def _tg_users() -> dict:
     return {"ok": True, "users": users}
 
 
+async def _tg_logs(tail: int = 50) -> dict:
+    lines = list(_bot_logs)[-tail:]
+    return {"ok": True, "lines": lines, "count": len(lines)}
+
+
+async def _tg_restart(bot_command: str | None = None, env: dict | None = None,
+                      startup_timeout: float | None = None) -> dict:
+    """Stop the bot process + reset mock state, then restart."""
+    global _bot_proc, _log_reader_task
+    if _bot_proc:
+        _bot_proc.terminate()
+        try:
+            loop = asyncio.get_event_loop()
+            await asyncio.wait_for(loop.run_in_executor(None, _bot_proc.wait), timeout=5.0)
+        except asyncio.TimeoutError:
+            _bot_proc.kill()
+        _bot_proc = None
+    if _log_reader_task:
+        _log_reader_task.cancel()
+        _log_reader_task = None
+
+    # Reset mock state (clear all users' responses/events)
+    if _mock:
+        session = await _get_session()
+        try:
+            async with session.post(f"{_base_url}/test/reset-all") as r:
+                pass
+        except Exception:
+            pass
+
+    # Restart bot using existing config
+    from pathlib import Path
+    from tgmock._config import load_config
+    cfg = load_config(Path.cwd())
+    cmd_str = bot_command or cfg.bot_command
+    timeout = startup_timeout if startup_timeout is not None else cfg.startup_timeout
+
+    bot_env = {**os.environ}
+    env_file = Path.cwd() / cfg.env_file
+    if env_file.exists():
+        import dotenv
+        bot_env.update(dotenv.dotenv_values(env_file))
+    bot_env["BOT_API_BASE"] = _base_url
+    bot_env.update(cfg.env)
+    if env:
+        bot_env.update(env)
+
+    _bot_logs.clear()
+    cmd = cmd_str.split()
+    _bot_proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=bot_env,
+    )
+    try:
+        await _wait_ready(_bot_proc, cfg.ready_log, timeout)
+    except Exception as e:
+        last_logs = list(_bot_logs)[-30:]
+        _bot_proc.terminate()
+        _bot_proc = None
+        log_text = "\n".join(last_logs) if last_logs else "(no output)"
+        raise RuntimeError(f"Bot failed to restart: {e}\n\nLast output:\n{log_text}") from e
+
+    await _start_log_reader(_bot_proc)
+    return {"ok": True, "pid": _bot_proc.pid, "message": "Bot restarted"}
+
+
 async def _tg_stop(timeout: float = 5.0) -> dict:
     global _mock, _bot_proc, _server_runner, _client_session
 
@@ -245,45 +381,56 @@ def create_server() -> "Server":
     @app.list_tools()
     async def list_tools() -> list[types.Tool]:
         return [
-            types.Tool(name="tg_start", description="Start fake Telegram API server and bot subprocess",
-                parameters={"type": "object", "properties": {
-                    "bot_command": {"type": "string", "description": "Command to start the bot (e.g. 'python main.py')"},
+            types.Tool(name="tg_start", description="Start fake Telegram API server and bot subprocess. All params optional if [tool.tgmock] is configured in pyproject.toml.",
+                inputSchema={"type": "object", "properties": {
+                    "bot_command": {"type": "string", "description": "Command to start the bot. Defaults to [tool.tgmock] bot_command in pyproject.toml."},
                     "port": {"type": "integer", "default": 8999},
-                    "ready_log": {"type": "string", "default": "bot starting", "description": "Substring in bot stdout that signals readiness"},
-                    "env": {"type": "object", "description": "Extra env vars for the bot subprocess"},
+                    "ready_log": {"type": "string", "description": "Substring in bot stdout that signals readiness. Defaults to [tool.tgmock] ready_log."},
+                    "env": {"type": "object", "description": "Extra env vars (merged on top of .env file). BOT_API_BASE is always injected automatically."},
                     "startup_timeout": {"type": "number", "default": 15.0},
-                }, "required": ["bot_command"]}),
+                    "build_command": {"type": "string", "description": "Shell command to build the bot before starting (e.g. 'go build -o /tmp/bot ./cmd/server'). Defaults to TGMOCK_BUILD_COMMAND in .env."},
+                }, "required": []}),
             types.Tool(name="tg_send", description="Send a text message as a test user, wait for bot response",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "text": {"type": "string"},
                     "user_id": {"type": "integer", "default": 111},
                     "timeout": {"type": "number", "default": 25.0},
                 }, "required": ["text"]}),
             types.Tool(name="tg_tap", description="Click an inline keyboard button by label (partial match)",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "label": {"type": "string", "description": "Button label (partial, case-insensitive match)"},
                     "user_id": {"type": "integer", "default": 111},
                     "timeout": {"type": "number", "default": 25.0},
                 }, "required": ["label"]}),
             types.Tool(name="tg_snapshot", description="Get current conversation state without sending anything",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "user_id": {"type": "integer", "default": 111},
                 }}),
             types.Tool(name="tg_events", description="Get custom events posted by the bot (e.g. tool calls)",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "user_id": {"type": "integer", "default": 111},
                     "type": {"type": "string", "description": "Filter by event type (e.g. 'tool_call')"},
                 }}),
             types.Tool(name="tg_reset", description="Reset user state: clear responses, events, trigger bot reset hook",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "user_id": {"type": "integer", "default": 111},
                 }}),
             types.Tool(name="tg_users", description="List active test users and their last message",
-                parameters={"type": "object", "properties": {}}),
+                inputSchema={"type": "object", "properties": {}}),
             types.Tool(name="tg_stop", description="Stop the mock server and bot subprocess",
-                parameters={"type": "object", "properties": {
+                inputSchema={"type": "object", "properties": {
                     "timeout": {"type": "number", "default": 5.0},
                 }}),
+            types.Tool(name="tg_logs", description="Get last N lines from bot stdout/stderr log buffer",
+                inputSchema={"type": "object", "properties": {
+                    "tail": {"type": "integer", "default": 50, "description": "Number of lines to return"},
+                }}),
+            types.Tool(name="tg_restart", description="Restart the bot process and reset mock state (keeps server running)",
+                inputSchema={"type": "object", "properties": {
+                    "bot_command": {"type": "string", "description": "Override bot command"},
+                    "env": {"type": "object", "description": "Extra env vars"},
+                    "startup_timeout": {"type": "number"},
+                }, "required": []}),
         ]
 
     @app.call_tool()
@@ -304,6 +451,10 @@ def create_server() -> "Server":
             result = await _tg_users()
         elif name == "tg_stop":
             result = await _tg_stop(**arguments)
+        elif name == "tg_logs":
+            result = await _tg_logs(**arguments)
+        elif name == "tg_restart":
+            result = await _tg_restart(**arguments)
         else:
             result = {"error": f"Unknown tool: {name}"}
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]

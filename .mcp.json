@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tgmock": {
+      "command": "python3",
+      "args": ["-m", "tgmock.mcp_server"]
+    }
+  }
+}

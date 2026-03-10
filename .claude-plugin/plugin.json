@@ -1,0 +1,13 @@
+{
+  "name": "tgmock",
+  "version": "0.1.0",
+  "description": "Fake Telegram API server for testing bots — pytest plugin + MCP server",
+  "author": {
+    "name": "tgmock contributors"
+  },
+  "repository": "https://github.com/amady/tgmock",
+  "license": "MIT",
+  "keywords": ["telegram", "bot", "testing", "mock", "pytest", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
