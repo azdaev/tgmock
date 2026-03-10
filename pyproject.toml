@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tgmock"
+version = "0.1.0"
+description = "Universal Telegram bot testing library — fake Telegram API server + pytest plugin + MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.entry-points."pytest11"]
+tgmock = "tgmock.plugin"
+
+[project.scripts]
+tgmock = "tgmock.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tgmock"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
+[tool.tgmock]
+# Override these in your project's pyproject.toml
+# bot_command = "python main.py"
+# port = 8999
+# token = "test:token"
+# settle_ms = 400
+# ready_log = "bot starting"
+# startup_timeout = 15
+# default_timeout = 25
+# [tool.tgmock.env]
+# DATABASE_URL = "postgres://..."
