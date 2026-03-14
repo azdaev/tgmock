@@ -8,12 +8,12 @@ You are helping the user configure tgmock for their Telegram bot project.
 ## Step 1: Check if tgmock is installed
 
 ```bash
-python3 -c "import tgmock; print('ok')"
+which tgmock && tgmock mcp --help > /dev/null 2>&1 && echo "ok"
 ```
 
 If not installed:
 ```bash
-pip install "tgmock[mcp]"
+pipx install "tgmock[mcp]"
 ```
 
 ## Step 2: Configure the project
