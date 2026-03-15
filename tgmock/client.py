@@ -125,6 +125,7 @@ class BotTestClient:
 
         `label_or_data`: button label (partial match) OR raw callback_data.
         `prev`: the BotResponse that contained the keyboard.
+               If omitted, searches the server's current responses for the button.
         """
         if prev is not None:
             data = prev.button_data(label_or_data)
@@ -135,8 +136,8 @@ class BotTestClient:
                 )
             msg_id = prev.message_id_with_keyboard() or 1
         else:
-            data = label_or_data
-            msg_id = 1
+            # Search server's stored responses for the button
+            data, msg_id = await self._find_button(label_or_data)
 
         await self._clear()
         async with self._session.post(
@@ -163,8 +164,7 @@ class BotTestClient:
                 data = label_or_data
             msg_id = prev.message_id_with_keyboard() or 1
         else:
-            data = label_or_data
-            msg_id = 1
+            data, msg_id = await self._find_button(label_or_data)
 
         async with self._session.post(
             f"{self.base_url}/test/callback",
@@ -212,6 +212,26 @@ class BotTestClient:
         return [e["data"] for e in raw]
 
     # ── internals ─────────────────────────────────────────────────────────────
+
+    async def _find_button(self, label: str) -> tuple[str, int]:
+        """Search server's stored responses for a button by label (partial match).
+        Returns (callback_data, message_id)."""
+        messages = await self._get_responses()
+        for msg in reversed(messages):
+            kb = msg.get("reply_markup")
+            if kb and "inline_keyboard" in kb:
+                for row in kb["inline_keyboard"]:
+                    for btn in row:
+                        if label.lower() in btn["text"].lower():
+                            return btn["callback_data"], msg.get("message_id", 1)
+        all_buttons = [
+            btn["text"] for msg in messages
+            for row in (msg.get("reply_markup") or {}).get("inline_keyboard", [])
+            for btn in row
+        ]
+        raise ValueError(
+            f"Button {label!r} not found in responses. Available: {all_buttons}"
+        )
 
     async def _clear(self):
         async with self._session.delete(

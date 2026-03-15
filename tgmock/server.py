@@ -79,6 +79,9 @@ class TelegramMockServer:
         self._response_event: asyncio.Event = asyncio.Event()
         # Custom events posted by the bot (tool calls, state changes, etc.)
         self._events: dict[int, list[dict]] = {}
+        # Persistent message store: (chat_id, message_id) → latest message state.
+        # Survives test_clear so callback queries can reference original messages.
+        self._messages: dict[tuple[int, int], dict] = {}
         # Optional reset hook: bot registers its callback URL here
         self._reset_url: str | None = None
 
@@ -96,13 +99,18 @@ class TelegramMockServer:
 
     def _fake_message(self, text: str, user_id: int, msg_id: int | None = None) -> dict:
         mid = msg_id or self._next_msg_id()
-        return {
+        msg: dict = {
             "message_id": mid,
             "from": {**TEST_USER, "id": user_id},
             "chat": {"id": user_id, "type": "private"},
             "date": int(time.time()),
             "text": text,
         }
+        # Add bot_command entity for /commands so bot frameworks can detect them
+        if text.startswith("/"):
+            cmd = text.split()[0] if text else text
+            msg["entities"] = [{"type": "bot_command", "offset": 0, "length": len(cmd)}]
+        return msg
 
     def _push_update(self, update: dict):
         self._updates.append(update)
@@ -114,6 +122,10 @@ class TelegramMockServer:
         self._response_seq[chat_id] = self._response_seq.get(chat_id, 0) + 1
         self._last_response_at[chat_id] = asyncio.get_event_loop().time()
         self._response_event.set()
+        # Keep persistent message state for callback query lookups
+        mid = record.get("message_id")
+        if mid is not None:
+            self._messages[(chat_id, mid)] = record
 
     # ── Telegram API: getUpdates (long-poll) ──────────────────────────────────
 
@@ -373,18 +385,28 @@ class TelegramMockServer:
         user_id = int(data.get("user_id", TEST_USER["id"]))
         callback_data = data.get("data", "")
         message_id = int(data.get("message_id", 1))
+
+        # Look up the original message from persistent store (survives test_clear)
+        stored = self._messages.get((user_id, message_id), {})
+        orig_text = stored.get("text", "")
+        orig_markup = stored.get("reply_markup")
+
+        cb_message: dict = {
+            "message_id": message_id,
+            "chat": {"id": user_id, "type": "private"},
+            "date": int(time.time()),
+            "text": orig_text,
+            "from": {"id": 999999, "is_bot": True, "first_name": "MockBot"},
+        }
+        if orig_markup:
+            cb_message["reply_markup"] = orig_markup
+
         update = {
             "update_id": self._next_update_id(),
             "callback_query": {
                 "id": str(self._next_update_id()),
                 "from": {**TEST_USER, "id": user_id},
-                "message": {
-                    "message_id": message_id,
-                    "chat": {"id": user_id, "type": "private"},
-                    "date": int(time.time()),
-                    "text": "",
-                    "from": {"id": 999999, "is_bot": True, "first_name": "MockBot"},
-                },
+                "message": cb_message,
                 "chat_instance": "mock",
                 "data": callback_data,
             },

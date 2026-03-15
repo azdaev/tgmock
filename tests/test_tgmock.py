@@ -243,6 +243,7 @@ def test_config_defaults():
     assert cfg.port == 8999
     assert cfg.token == "test:token"
     assert cfg.settle_ms == 400
+    assert cfg.auto_patch is True
     assert cfg.env == {}
 
 
@@ -272,3 +273,57 @@ def test_user_id_monotonic():
     a = next_user_id()
     b = next_user_id()
     assert b > a
+
+
+# ── Tests: autopatch ─────────────────────────────────────────────────────────
+
+from tgmock._autopatch import prepare_autopatch, is_python_command
+
+
+def test_is_python_command():
+    assert is_python_command("python main.py") is True
+    assert is_python_command("python3 main.py") is True
+    assert is_python_command("python3.12 bot.py") is True
+    assert is_python_command("node bot.js") is False
+    assert is_python_command("./mybot") is False
+    assert is_python_command("go run .") is False
+    assert is_python_command("") is False
+
+
+def test_prepare_autopatch_creates_sitecustomize(tmp_path):
+    tmpdir, env_patch = prepare_autopatch("http://localhost:9999")
+    try:
+        import pathlib
+        site_file = pathlib.Path(tmpdir) / "sitecustomize.py"
+        assert site_file.exists()
+        content = site_file.read_text()
+        assert "api.telegram.org" in content
+        assert "localhost" in content
+        assert "9999" in content
+        assert "PYTHONPATH" in env_patch
+        assert tmpdir in env_patch["PYTHONPATH"]
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_config_auto_patch_from_env(tmp_path):
+    import os
+    old = os.environ.get("TGMOCK_AUTO_PATCH")
+    try:
+        os.environ["TGMOCK_AUTO_PATCH"] = "false"
+        cfg = load_config(tmp_path)
+        assert cfg.auto_patch is False
+    finally:
+        if old is None:
+            os.environ.pop("TGMOCK_AUTO_PATCH", None)
+        else:
+            os.environ["TGMOCK_AUTO_PATCH"] = old
+
+
+def test_config_auto_patch_from_toml(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.tgmock]\nauto_patch = false\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.auto_patch is False

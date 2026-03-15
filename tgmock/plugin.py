@@ -108,6 +108,15 @@ async def tg_bot(
         "BOT_TOKEN": tgmock_config.token,
         **tgmock_config.env,
     }
+
+    # Auto-patch: monkey-patch HTTP clients so the bot needs no code changes
+    autopatch_tmpdir = None
+    if tgmock_config.auto_patch:
+        from tgmock._autopatch import prepare_autopatch, is_python_command
+        if is_python_command(tgmock_config.bot_command):
+            autopatch_tmpdir, patch_env = prepare_autopatch(base_url)
+            env.update(patch_env)
+
     cmd = tgmock_config.bot_command.split()
     proc = subprocess.Popen(
         cmd,
@@ -164,6 +173,9 @@ async def tg_bot(
             proc.kill()
         drain_task.cancel()
         await asyncio.gather(drain_task, return_exceptions=True)
+        if autopatch_tmpdir:
+            import shutil
+            shutil.rmtree(autopatch_tmpdir, ignore_errors=True)
 
 
 # ── tg_client: function-scoped client with unique user_id ────────────────────

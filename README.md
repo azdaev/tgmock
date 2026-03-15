@@ -48,6 +48,8 @@ The pytest plugin registers automatically via `pytest11` entry point.
 
 tgmock starts a local HTTP server that mimics the Telegram Bot API. Your bot talks to it instead of the real Telegram. You send messages and click buttons via test utilities; the bot responds to the fake server. No real Telegram account needed.
 
+**For Python bots**, tgmock automatically patches HTTP clients (aiohttp, httpx) so your bot needs zero code changes. Just configure and go.
+
 ## Install
 
 ```bash
@@ -81,9 +83,18 @@ startup_timeout = 15
 
 Config priority: `TGMOCK_*` env vars > `TGMOCK_*` in `.env` file > `[tool.tgmock]` in `pyproject.toml` > defaults.
 
-## Add BOT_API_BASE support to your bot
+## Auto-patch (Python bots — no code changes needed)
 
-tgmock injects `BOT_API_BASE` automatically — your bot must use it.
+For Python bots using **aiohttp** (aiogram) or **httpx** (python-telegram-bot v20+), tgmock automatically monkey-patches HTTP clients to redirect `api.telegram.org` calls to the mock server. This is enabled by default — no code changes needed.
+
+To disable:
+```env
+TGMOCK_AUTO_PATCH=false
+```
+
+## Manual setup (non-Python bots or auto_patch=false)
+
+For non-Python bots or if you prefer explicit control, add `BOT_API_BASE` support to your bot. tgmock injects `BOT_API_BASE` automatically — the bot must use it.
 
 **aiogram 3.x:**
 ```python

@@ -1,6 +1,6 @@
 ---
 name: tgmock:setup
-description: Guide per-project setup for tgmock bot testing
+description: Guide per-project setup for tgmock bot testing. Use this skill whenever a user wants to set up, configure, or install tgmock for their Telegram bot project — even if they just say "I want to test my bot" or "set up testing" without mentioning tgmock by name. Also use when they hit setup-related errors like "Bot exited before ready" or "port in use".
 ---
 
 You are helping the user configure tgmock for their Telegram bot project.
@@ -32,13 +32,30 @@ TGMOCK_READY_LOG=Bot starting            # substring in bot output that means "r
 # Optional overrides
 # TGMOCK_PORT=8999
 # TGMOCK_STARTUP_TIMEOUT=30
+# TGMOCK_AUTO_PATCH=true              # enabled by default for Python bots
 ```
 
-**How to find TGMOCK_READY_LOG**: look at what your bot prints when it's ready to receive messages. For aiogram bots it's usually "Bot starting" or "Polling started". Run `python main.py` and look at the first log lines.
+Or configure in `pyproject.toml`:
+```toml
+[tool.tgmock]
+bot_command = "python main.py"
+ready_log = "Bot starting"
+```
 
-## Step 3: Add BOT_API_BASE support to your bot
+**How to find TGMOCK_READY_LOG**: look at what your bot prints when it's ready to receive messages. For aiogram bots it's usually "Bot starting" or "Polling started". Run the bot command and look at the first log lines.
 
-tgmock injects `BOT_API_BASE` automatically — the bot must use it to redirect API calls to the mock server.
+## Step 3: Auto-patch (Python bots — no code changes needed!)
+
+For **Python bots** (aiogram, python-telegram-bot, etc.), tgmock automatically patches HTTP clients (aiohttp, httpx) so your bot talks to the mock server without any code changes. This is enabled by default — just configure `.env` and go.
+
+To disable auto-patching (e.g. if you already have `BOT_API_BASE` support):
+```env
+TGMOCK_AUTO_PATCH=false
+```
+
+## Step 3b: Manual setup (non-Python bots or auto_patch=false)
+
+If auto-patch is disabled or you're using a non-Python bot, add `BOT_API_BASE` support manually. tgmock injects `BOT_API_BASE` automatically — the bot must use it to redirect API calls to the mock server.
 
 **For aiogram 3.x** — add these lines to `main.py`:
 ```python
@@ -83,5 +100,6 @@ tg_start → tg_send("hello") → tg_snapshot → tg_stop
 
 Common issues:
 - **"Bot exited before ready"**: wrong TGMOCK_READY_LOG, or missing env vars. Check `tg_logs`.
-- **Bot responds with 404**: BOT_API_BASE not wired up, bot still calls real Telegram API.
+- **Bot responds with 404**: BOT_API_BASE not wired up and auto-patch not active. Check if your bot uses aiohttp or httpx (auto-patch supports these).
 - **Port in use**: another tgmock session running. Call `tg_stop` first.
+- **Auto-patch not working**: make sure TGMOCK_BOT_COMMAND starts with `python` or `python3`. For virtual envs, use the full path: `TGMOCK_BOT_COMMAND=.venv/bin/python main.py`.

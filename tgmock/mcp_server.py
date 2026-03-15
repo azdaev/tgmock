@@ -45,6 +45,7 @@ _default_user_id: int = 111
 _default_timeout: float = 25.0
 _bot_logs: collections.deque = collections.deque(maxlen=100)  # rolling log buffer
 _log_reader_task: asyncio.Task | None = None
+_autopatch_tmpdir: str | None = None  # temp dir for sitecustomize.py
 
 
 def _snapshot_text(messages: list[dict]) -> str:
@@ -116,11 +117,12 @@ async def _tg_start(bot_command: str | None = None, port: int | None = None,
                     ready_log: str | None = None, env: dict | None = None,
                     startup_timeout: float | None = None,
                     build_command: str | None = None) -> dict:
-    global _mock, _bot_proc, _server_runner, _base_url
+    global _mock, _bot_proc, _server_runner, _base_url, _autopatch_tmpdir
     _bot_logs.clear()
 
     from pathlib import Path
     from tgmock._config import load_config
+    from tgmock._autopatch import prepare_autopatch, is_python_command
     from tgmock.server import TelegramMockServer
 
     # Load project config from cwd (Claude Code sets MCP server cwd = project root)
@@ -143,6 +145,12 @@ async def _tg_start(bot_command: str | None = None, port: int | None = None,
     bot_env.update(cfg.env)
     if env:
         bot_env.update(env)   # caller overrides win
+
+    # Auto-patch: monkey-patch HTTP clients so the bot needs no code changes
+    if cfg.auto_patch and is_python_command(bot_command):
+        _autopatch_tmpdir, patch_env = prepare_autopatch(_base_url)
+        bot_env.update(patch_env)
+        sys.stderr.write("[tgmock] auto-patch enabled — bot needs no BOT_API_BASE support\n")
 
     # Run build command if configured (e.g. compile Go binary before starting)
     if build_command:
@@ -287,6 +295,7 @@ async def _tg_restart(bot_command: str | None = None, env: dict | None = None,
                       startup_timeout: float | None = None) -> dict:
     """Stop the bot process + reset mock state, then restart."""
     global _bot_proc, _log_reader_task
+    from tgmock._autopatch import is_python_command
     if _bot_proc:
         _bot_proc.terminate()
         try:
@@ -325,6 +334,10 @@ async def _tg_restart(bot_command: str | None = None, env: dict | None = None,
     if env:
         bot_env.update(env)
 
+    # Reuse autopatch if active
+    if _autopatch_tmpdir and cfg.auto_patch and is_python_command(cmd_str):
+        bot_env["PYTHONPATH"] = f"{_autopatch_tmpdir}:{bot_env.get('PYTHONPATH', '')}"
+
     _bot_logs.clear()
     cmd = cmd_str.split()
     _bot_proc = subprocess.Popen(
@@ -345,7 +358,7 @@ async def _tg_restart(bot_command: str | None = None, env: dict | None = None,
 
 
 async def _tg_stop(timeout: float = 5.0) -> dict:
-    global _mock, _bot_proc, _server_runner, _client_session
+    global _mock, _bot_proc, _server_runner, _client_session, _autopatch_tmpdir
 
     if _bot_proc:
         _bot_proc.terminate()
@@ -366,6 +379,11 @@ async def _tg_stop(timeout: float = 5.0) -> dict:
     if _client_session and not _client_session.closed:
         await _client_session.close()
         _client_session = None
+
+    if _autopatch_tmpdir:
+        import shutil
+        shutil.rmtree(_autopatch_tmpdir, ignore_errors=True)
+        _autopatch_tmpdir = None
 
     return {"ok": True, "message": "Server and bot stopped"}
 

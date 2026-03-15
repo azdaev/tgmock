@@ -9,12 +9,14 @@ from pathlib import Path
 class TgmockConfig:
     bot_command: str = "python main.py"
     port: int = 8999
+    token: str = "test:token"
     settle_ms: int = 400
     ready_log: str = "bot starting"
     startup_timeout: float = 15.0
     default_timeout: float = 25.0
     env_file: str = ".env"
     build_command: str = ""  # run before bot start (e.g. "go build -o /tmp/bot ./cmd/server")
+    auto_patch: bool = True  # monkey-patch HTTP clients so bot needs no code changes
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -39,7 +41,8 @@ def load_config(rootdir: Path) -> TgmockConfig:
                 data = tomllib.load(f)
             raw: dict = data.get("tool", {}).get("tgmock", {})
             for key in ("bot_command", "port", "settle_ms", "ready_log",
-                        "startup_timeout", "default_timeout", "env_file"):
+                        "startup_timeout", "default_timeout", "env_file",
+                        "auto_patch", "token"):
                 if key in raw:
                     setattr(cfg, key, raw[key])
             cfg.env.update(raw.get("env", {}))
@@ -64,15 +67,18 @@ def load_config(rootdir: Path) -> TgmockConfig:
 
 def _apply_tgmock_vars(cfg: TgmockConfig, mapping: dict) -> None:
     """Apply TGMOCK_* keys from a dict onto cfg."""
-    str_keys = {"bot_command", "ready_log", "env_file", "build_command"}
+    str_keys = {"bot_command", "ready_log", "env_file", "build_command", "token"}
     int_keys = {"port", "settle_ms"}
     float_keys = {"startup_timeout", "default_timeout"}
-    for key in str_keys | int_keys | float_keys:
+    bool_keys = {"auto_patch"}
+    for key in str_keys | int_keys | float_keys | bool_keys:
         val = mapping.get(f"TGMOCK_{key.upper()}")
         if val is not None:
             if key in int_keys:
                 setattr(cfg, key, int(val))
             elif key in float_keys:
                 setattr(cfg, key, float(val))
+            elif key in bool_keys:
+                setattr(cfg, key, val if isinstance(val, bool) else val.lower() in ("1", "true", "yes"))
             else:
                 setattr(cfg, key, val)
